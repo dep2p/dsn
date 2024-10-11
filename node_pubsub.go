@@ -10,7 +10,6 @@ import (
 	"time"
 
 	pb "github.com/dep2p/dsn/pb"
-	"github.com/libp2p/go-libp2p/core/discovery"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/sirupsen/logrus"
@@ -36,7 +35,7 @@ type DSN struct {
 	startUp          int32                    // 启动状态，用原子操作来保证线程安全
 	subscribedTopics map[string]*Subscription // 已订阅的主题，存储所有当前节点订阅的主题
 	subscribeLock    sync.Mutex               // 订阅锁，用于保护订阅操作的并发访问
-	discoveryService discovery.Discovery      // 发现服务，用于在网络中发现其他节点
+	// discoveryService discovery.Discovery      // 发现服务，用于在网络中发现其他节点
 }
 
 // NewDSN 创建并返回一个新的 DSN 实例
@@ -59,11 +58,11 @@ func NewDSN(ctx context.Context, host host.Host, opts ...NodeOption) (*DSN, erro
 	ctx, cancel := context.WithCancel(ctx)
 
 	// 创建发现服务，用于在网络中发现其他节点
-	discoveryService, err := createDiscoveryService(ctx, host)
-	if err != nil {
-		cancel()
-		return nil, err
-	}
+	// discoveryService, err := createDiscoveryService(ctx, host)
+	// if err != nil {
+	// 	cancel()
+	// 	return nil, err
+	// }
 
 	// 初始化DSN实例，设置各个字段的初始值
 	dsn := &DSN{
@@ -73,7 +72,7 @@ func NewDSN(ctx context.Context, host host.Host, opts ...NodeOption) (*DSN, erro
 		topicMap:         make(map[string]*Topic),
 		startUp:          0,
 		subscribedTopics: make(map[string]*Subscription),
-		discoveryService: discoveryService,
+		// discoveryService: discoveryService,
 	}
 
 	// 启动 PubSub 服务
@@ -111,7 +110,7 @@ func (dsn *DSN) startPubSub(options *Options) error {
 		WithEventTracer(tracer),
 		WithPeerExchange(true),
 		WithGossipSubParams(params),
-		WithDiscovery(dsn.discoveryService),
+		// WithDiscovery(dsn.discoveryService),
 		WithFloodPublish(true),
 		WithMessageSigning(options.SignMessages),
 		WithStrictSignatureVerification(options.ValidateMessages),
