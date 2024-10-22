@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	pb "github.com/dep2p/dsn/pb"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/sirupsen/logrus"
@@ -22,7 +21,7 @@ const (
 )
 
 // PubSubMsgHandler 定义了处理其他节点发布消息的函数类型
-type PubSubMsgHandler func(*pb.Message)
+type PubSubMsgHandler func(*Message)
 
 // DSN 表示分布式存储网络的主要结构
 type DSN struct {
@@ -360,7 +359,7 @@ func (dsn *DSN) topicSubLoop(topicSub *Subscription, handler PubSubMsgHandler) {
 		}
 
 		// 解析消息
-		var request pb.Message
+		var request Message
 		if err := request.Unmarshal(message.Data); err != nil {
 			return
 		}
