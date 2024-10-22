@@ -22,7 +22,7 @@ const (
 )
 
 // PubSubMsgHandler 定义了处理其他节点发布消息的函数类型
-type PubSubMsgHandler func(*pb.StreamRequestMessage)
+type PubSubMsgHandler func(*pb.Message)
 
 // DSN 表示分布式存储网络的主要结构
 type DSN struct {
@@ -360,13 +360,22 @@ func (dsn *DSN) topicSubLoop(topicSub *Subscription, handler PubSubMsgHandler) {
 		}
 
 		// 解析消息
-		var request pb.StreamRequestMessage
+		var request pb.Message
 		if err := request.Unmarshal(message.Data); err != nil {
 			return
 		}
 
+		if len(request.From) == 0 {
+			return
+		}
+
+		pid, err := peer.IDFromBytes(request.From) // 从消息中提取 peer.ID
+		if err != nil {
+			return
+		}
+
 		// 检查接收者是否为自己
-		if request.Message.Receiver != "" && request.Message.Receiver != dsn.host.ID().String() {
+		if pid.String() != dsn.host.ID().String() {
 			continue
 		}
 
