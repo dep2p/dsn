@@ -332,6 +332,57 @@ func (dsn *DSN) SubscribeWithTopic(topic string, handler PubSubMsgHandler, subsc
 	return nil
 }
 
+// // topicSubLoop 用于处理订阅主题的消息循环
+// // 参数:
+// //   - topicSub: 订阅实例
+// //   - handler: 用于处理接收到的消息的函数
+// func (dsn *DSN) topicSubLoop(topicSub *Subscription, handler PubSubMsgHandler) {
+// 	for {
+// 		// 获取下一条消息
+// 		message, err := topicSub.Next(dsn.ctx)
+
+// 		if err != nil {
+// 			if err.Error() == "subscription cancelled" {
+// 				logrus.Warn("[DSN] 订阅已取消：", err)
+// 				break
+// 			}
+// 			logrus.Errorf("[DSN] 订阅下一个消息失败：%s", err.Error())
+// 		}
+
+// 		if message == nil {
+// 			return
+// 		}
+
+// 		// 忽略自己发送的消息
+// 		if message.GetFrom() == dsn.host.ID() {
+// 			continue
+// 		}
+
+// 		// 解析消息
+// 		var request Message
+// 		if err := request.Unmarshal(message.Data); err != nil {
+// 			return
+// 		}
+
+// 		if len(request.From) == 0 {
+// 			return
+// 		}
+
+// 		pid, err := peer.IDFromBytes(request.From) // 从消息中提取 peer.ID
+// 		if err != nil {
+// 			return
+// 		}
+
+// 		// 检查接收者是否为自己
+// 		if pid.String() != dsn.host.ID().String() {
+// 			continue
+// 		}
+
+// 		// 处理消息
+// 		handler(&request)
+// 	}
+// }
+
 // topicSubLoop 用于处理订阅主题的消息循环
 // 参数:
 //   - topicSub: 订阅实例
@@ -359,27 +410,29 @@ func (dsn *DSN) topicSubLoop(topicSub *Subscription, handler PubSubMsgHandler) {
 		}
 
 		// 解析消息
-		var request Message
-		if err := request.Unmarshal(message.Data); err != nil {
+		// var request Message
+		// fmt.Println(len(message.Data))
+		// if err := request.Unmarshal(message); err != nil {
+		// 	return
+		// }
+
+		if len(message.From) == 0 {
 			return
 		}
 
-		if len(request.From) == 0 {
-			return
-		}
-
-		pid, err := peer.IDFromBytes(request.From) // 从消息中提取 peer.ID
+		pid, err := peer.IDFromBytes(message.From) // 从消息中提取 peer.ID
 		if err != nil {
+
 			return
 		}
 
 		// 检查接收者是否为自己
-		if pid.String() != dsn.host.ID().String() {
+		if pid.String() == dsn.host.ID().String() {
 			continue
 		}
 
 		// 处理消息
-		handler(&request)
+		handler(message)
 	}
 }
 
