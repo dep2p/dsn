@@ -334,9 +334,10 @@ func (t *Topic) Publish(ctx context.Context, data []byte, opts ...PubOpt) error 
 	}
 
 	// 确保 data 不为空
-	if len(data) == 0 {
-		return fmt.Errorf("消息数据不能为空")
-	}
+	// TODO:暂时注释，后面再优化
+	// if len(data) == 0 {
+	// 	return fmt.Errorf("消息数据不能为空")
+	// }
 
 	pid := t.p.signID  // 获取发布者的对等节点 ID
 	key := t.p.signKey // 获取发布者的签名密钥
