@@ -186,16 +186,22 @@ func (dsn *DSN) Subscribe(topic string, subscribe bool) (*Subscription, error) {
 	if topic == "" {
 		topic = DefaultPubsubProtocol
 	}
+
 	// 获取主题
 	t, err := dsn.GetTopic(topic)
 	if err != nil {
 		return nil, err
 	}
-	logrus.Infof("[DSN] gossip-sub 订阅 topic[%s]", topic)
+
+	logrus.Infof("[DSN] 订阅主题 [%s]", topic)
 
 	// 如果需要订阅，则返回订阅实例
 	if subscribe {
-		return t.Subscribe()
+		// 设置订阅选项，包括缓冲区大小
+		opts := []SubOpt{
+			WithBufferSize(2048), // 设置合适的缓冲区大小
+		}
+		return t.Subscribe(opts...)
 	}
 	return nil, nil
 }
@@ -431,8 +437,16 @@ func (dsn *DSN) topicSubLoop(topicSub *Subscription, handler PubSubMsgHandler) {
 			continue
 		}
 
-		// 处理消息
-		handler(message)
+		// 使用 goroutine 处理消息，避免阻塞
+		go func() {
+			defer dsn.cancel()
+			select {
+			case <-dsn.ctx.Done():
+				return
+			default:
+				handler(message)
+			}
+		}()
 	}
 }
 
