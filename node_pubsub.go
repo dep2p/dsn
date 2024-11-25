@@ -99,7 +99,6 @@ func (dsn *DSN) startPubSub(options *Options) error {
 	var pubsubOpts []Option
 
 	// 根据 LoadConfig 选项决定是否加载详细配置
-	// 当 LoadConfig 为 true 时，将加载所有高级特性和配置项
 	if options.GetLoadConfig() {
 		// 创建JSON追踪器，用于记录和追踪PubSub网络中的事件和消息流
 		tracer, err := NewJSONTracer("/tmp/trace.out.json")
@@ -108,90 +107,90 @@ func (dsn *DSN) startPubSub(options *Options) error {
 			return err
 		}
 
-		// 配置 GossipSub 协议的具体参数
-		// 这些参数决定了消息传播的行为和网络拓扑
-		params := DefaultGossipSubParams()
-		params.D = options.D                                 // 设置每个节点维护的对等点数量
-		params.Dlo = options.Dlo                             // 设置对等点数量的最小阈值
-		params.HeartbeatInterval = options.HeartbeatInterval // 设置心跳间隔，用于维护网络连接
-		params.IWantFollowupTime = options.FollowupTime      // 设置消息请求的跟进时间
-
-		// 配置完整的 PubSub 选项，包括各种高级特性
-		pubsubOpts = []Option{
+		// 所有模式通用的基础配置选项
+		baseOpts := []Option{
 			WithEventTracer(tracer),                                   // 启用事件追踪，用于调试和监控
-			WithPeerExchange(true),                                    // 启用对等节点交换，提高网络连通性
-			WithGossipSubParams(params),                               // 设置 GossipSub 协议参数
-			WithFloodPublish(true),                                    // 启用洪泛式消息发布，提高消息传播效率
 			WithMessageSigning(options.SignMessages),                  // 配置消息签名选项
 			WithStrictSignatureVerification(options.ValidateMessages), // 配置签名验证严格程度
+			WithMaxMessageSize(options.MaxMessageSize),                // 设置最大消息大小限制
+		}
 
-			// 配置节点评分系统，用于优化网络拓扑和消息传播
-			WithPeerScore(
-				// 评分参数配置
-				&PeerScoreParams{
-					TopicScoreCap:    100,                                // 主题评分上限
-					AppSpecificScore: func(peer.ID) float64 { return 0 }, // 应用特定评分函数
-					DecayInterval:    time.Second,                        // 评分衰减间隔
-					DecayToZero:      0.01,                               // 评分衰减至零的速率
-				},
-				// 评分阈值配置
-				&PeerScoreThresholds{
-					GossipThreshold:             -1, // Gossip消息传播阈值
-					PublishThreshold:            -2, // 消息发布阈值
-					GraylistThreshold:           -3, // 灰名单阈值
-					OpportunisticGraftThreshold: 1,  // 机会性嫁接阈值
-				},
-			),
-			WithMaxMessageSize(options.MaxMessageSize), // 设置最大消息大小限制
+		// 根据不同的发布订阅模式添加特定的配置选项
+		switch options.GetPubSubMode() {
+		case GossipSub:
+			// GossipSub 特定的参数配置
+			params := DefaultGossipSubParams()
+			params.D = options.D                                 // 设置每个节点维护的对等点数量
+			params.Dlo = options.Dlo                             // 设置对等点数量的最小阈值
+			params.HeartbeatInterval = options.HeartbeatInterval // 设置心跳间隔
+			params.IWantFollowupTime = options.FollowupTime      // 设置消息请求的跟进时间
+
+			// GossipSub 特定的选项
+			gossipOpts := []Option{
+				WithPeerExchange(true),      // 启用对等节点交换
+				WithGossipSubParams(params), // 设置 GossipSub 协议参数
+				WithFloodPublish(true),      // 启用洪泛式消息发布
+				// 配置节点评分系统，仅用于 GossipSub
+				WithPeerScore(
+					&PeerScoreParams{
+						TopicScoreCap:    100,                                // 主题分数上限
+						AppSpecificScore: func(peer.ID) float64 { return 0 }, // 应用特定的评分函数,这里默认返回0
+						DecayInterval:    time.Second,                        // 分数衰减间隔
+						DecayToZero:      0.01,                               // 衰减到0的速率
+					},
+					&PeerScoreThresholds{
+						GossipThreshold:             -1, // Gossip消息传播的阈值
+						PublishThreshold:            -2, // 发布消息的阈值
+						GraylistThreshold:           -3, // 灰名单阈值
+						OpportunisticGraftThreshold: 1,  // 机会性嫁接的阈值
+					},
+				),
+			}
+			pubsubOpts = append(baseOpts, gossipOpts...)
+
+		case FloodSub:
+			// FloodSub 使用基础配置即可
+			pubsubOpts = baseOpts
+
+		case RandomSub:
+			// RandomSub 特定的配置（如果有的话）
+			pubsubOpts = baseOpts
+			// 可以在这里添加 RandomSub 特定的选项
 		}
 	} else {
 		// 如果不加载详细配置，只使用基本的消息大小限制
-		// 这种模式下，系统将使用所有特性的默认值
 		pubsubOpts = []Option{
 			WithMaxMessageSize(options.MaxMessageSize),
 		}
 	}
 
 	// 根据配置的 PubSubMode 创建相应的发布订阅实例
-	// 支持三种不同的发布订阅策略，每种策略都有其特定的使用场景
 	var ps *PubSub
 	var err error
 
 	switch options.GetPubSubMode() {
 	case FloodSub:
-		// FloodSub: 简单的洪泛式广播策略
-		// 适用于网络规模较小或需要简单可靠传播的场景
 		ps, err = NewFloodSub(dsn.ctx, dsn.host, pubsubOpts...)
 		if err == nil {
 			logrus.Info("[DSN] flood-sub 服务已启动")
 		}
 	case RandomSub:
-		// RandomSub: 随机传播策略
-		// 在消息传播和网络负载之间取得平衡
-		// ps, err = NewRandomSub(dsn.ctx, dsn.host, pubsubOpts...)
-		// if err == nil {
-		// 	logrus.Info("[DSN] random-sub 服务已启动")
-		// }
 		return fmt.Errorf("暂不支持RandomSub")
 	case GossipSub:
 		fallthrough
 	default:
-		// GossipSub: 默认策略，基于 Gossip 协议的消息传播
-		// 提供最佳的扩展性和消息传播效率
 		ps, err = NewGossipSub(dsn.ctx, dsn.host, pubsubOpts...)
 		if err == nil {
 			logrus.Info("[DSN] gossip-sub 服务已启动")
 		}
 	}
 
-	// 检查发布订阅实例创建是否成功
 	if err != nil {
 		return err
 	}
 
-	// 保存 PubSub 实例并更新启动状态
 	dsn.pubsub = ps
-	atomic.StoreInt32(&dsn.startUp, 2) // 使用原子操作更新状态，确保线程安全
+	atomic.StoreInt32(&dsn.startUp, 2)
 	return nil
 }
 
@@ -504,7 +503,7 @@ func (dsn *DSN) topicSubLoop(topicSub *Subscription, handler PubSubMsgHandler) {
 
 // Pubsub 返回 PubSub 实例
 // 返回:
-//   - *PubSub: 当前DSN实例使用的PubSub实例
+//   - *PubSub: 当前DSN��例使用的PubSub实例
 func (dsn *DSN) Pubsub() *PubSub {
 	return dsn.pubsub
 }

@@ -58,20 +58,68 @@ func (opt *Options) ApplyOptions(opts ...NodeOption) error {
 // DefaultOptions 返回一个带有默认配置的 Options 对象
 // 返回值:
 //   - *Options: 包含默认配置的 Options 对象
+// func DefaultOptions() *Options {
+// 	return &Options{
+// 		FollowupTime:        1 * time.Second, // 默认跟随时间为1秒
+// 		GossipFactor:        0.12,            // 默认Gossip因子为0.12
+// 		D:                   8,               // 默认主题网格的理想度数为8
+// 		Dlo:                 6,               // 默认主题网格中保持的最少节点数为6
+// 		MaxPendingConns:     23,              // 默认最大待处理连接数为23
+// 		MaxMessageSize:      1024 * 1024,     // 默认最大消息大小为1MB
+// 		SignMessages:        true,            // 默认签名消息
+// 		ValidateMessages:    true,            // 默认验证消息
+// 		HeartbeatInterval:   1 * time.Second, // 默认心跳间隔为1秒
+// 		MaxTransmissionSize: 10 << 20,        // 默认最大传输大小为10MB
+// 		LoadConfig:          false,           // 默认不加载配置
+// 		PubSubMode:          GossipSub,       // 默认使用 GossipSub
+// 	}
+// }
+
+// DefaultOptions 返回一个带有默认配置的 Options 对象
+// 返回值:
+//   - *Options: 包含默认配置的 Options 对象
 func DefaultOptions() *Options {
 	return &Options{
-		FollowupTime:        1 * time.Second, // 默认跟随时间为1秒
-		GossipFactor:        0.12,            // 默认Gossip因子为0.12
-		D:                   8,               // 默认主题网格的理想度数为8
-		Dlo:                 6,               // 默认主题网格中保持的最少节点数为6
-		MaxPendingConns:     23,              // 默认最大待处理连接数为23
-		MaxMessageSize:      1024 * 1024,     // 默认最大消息大小为1MB
-		SignMessages:        true,            // 默认签名消息
-		ValidateMessages:    true,            // 默认验证消息
-		HeartbeatInterval:   1 * time.Second, // 默认心跳间隔为1秒
-		MaxTransmissionSize: 10 << 20,        // 默认最大传输大小为10MB
-		LoadConfig:          false,           // 默认不加载配置
-		PubSubMode:          GossipSub,       // 默认使用 GossipSub
+		// 降低跟随时间，加快消息响应速度
+		// 在小规模网络中，消息传播延迟较小，可以使用更短的跟随时间
+		FollowupTime: 500 * time.Millisecond,
+
+		// 降低 Gossip 因子，减少不必要的消息传播
+		// 在节点数量少的情况下，不需要太高的传播率
+		GossipFactor: 0.25, // 提高到 0.25，因为只有 2 个节点
+
+		// 降低网格度数要求，适应小规模网络
+		// D 是每个主题维护的最大对等点数量
+		// 对于 2 个节点的网络，设置为 2 就足够了
+		D: 2, // 最小化，因为只有 2 个节点
+
+		// Dlo 是维护的最小对等点数量
+		// 对于 2 个节点的网络，设置为 1 确保至少保持一个连接
+		Dlo: 1, // 最小化，确保至少有一个连接
+
+		// 减少最大待处理连接数，因为节点数量少
+		MaxPendingConns: 5, // 小规模网络不需要太多待处理连接
+
+		// 保持合理的消息大小限制
+		MaxMessageSize: 1024 * 1024, // 1MB，根据实际需求调整
+
+		// 在小规模可信网络中，可以考虑关闭签名和验证以提高性能
+		SignMessages:     false, // 小规模可信网络可以关闭
+		ValidateMessages: false, // 小规模可信网络可以关闭
+
+		// 降低心跳间隔，加快节点状态更新
+		// 在小规模网络中，可以使用更频繁的心跳来保持连接状态
+		HeartbeatInterval: 500 * time.Millisecond,
+
+		// 保持合理的传输大小限制
+		MaxTransmissionSize: 5 << 20, // 5MB，根据实际需求调整
+
+		// 启用配置加载，使用自定义的优化配置
+		LoadConfig: true, // 启用配置以使用优化的参数
+
+		// 使用 GossipSub 模式
+		// 即使是小规模网络，GossipSub 也能提供可靠的消息传递
+		PubSubMode: GossipSub,
 	}
 }
 

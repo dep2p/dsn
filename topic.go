@@ -14,6 +14,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/libp2p/go-libp2p/core/crypto"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/sirupsen/logrus"
 
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -278,43 +279,180 @@ type PubOpt func(pub *PublishOptions) error
 // 返回值:
 // - []byte: 接收到的回复消息
 // - error: 如果出现错误，返回错误信息
+// func (t *Topic) PublishWithReply(ctx context.Context, data []byte, targetNodes ...peer.ID) ([]byte, error) {
+// 	msgID := uuid.New().String()      // 生成一个唯一的消息 ID，用于匹配回复
+// 	replyChan := make(chan []byte, 1) // 创建一个带缓冲的通道，用于接收回复
+
+// 	t.mux.Lock()                   // 加锁以保护共享数据结构的访问
+// 	t.p.replies[msgID] = replyChan // 将消息 ID 和通道关联存储到 replies map 中
+// 	t.mux.Unlock()                 // 解锁
+
+// 	var err error
+// 	for i := 0; i < t.p.retry; i++ { // 循环执行重试机制
+// 		pubOpts := []PubOpt{
+// 			WithReadiness(MinTopicSize(numHosts)),                  // 设置对等节点准备
+// 			WithMessageMetadata(msgID, pb.MessageMetadata_REQUEST), // 设置消息元数据
+// 		}
+
+// 		// 只有在提供了目标节点时才添加 WithTargetMap 选项
+// 		if len(targetNodes) > 0 {
+// 			pubOpts = append(pubOpts, WithTargetMap(targetNodes))
+// 		}
+
+// 		err = t.Publish(ctx, data, pubOpts...)
+// 		if err == nil { // 如果发布成功，退出循环
+// 			break
+// 		}
+// 		logrus.Printf("第 %d 次发布尝试失败: %v", i+1, err)
+// 		time.Sleep(500 * time.Millisecond) // 在重试之间添加短暂的延迟
+// 	}
+
+// 	if err != nil { // 如果经过多次重试仍然失败
+// 		return nil, fmt.Errorf("多次重试后发布消息失败: %d 次重试后失败: %v", t.p.retry, err)
+// 	}
+
+// 	select {
+// 	case reply := <-replyChan: // 如果收到回复
+// 		return reply, nil // 返回收到的回复
+// 	case <-time.After(t.p.timeout): // 如果等待超时
+// 		return nil, errors.New("等待回复超时")
+// 	}
+// }
+
+// PublishWithReply 发送消息并等待响应
+//
+// 使用示例:
+//
+//	// 不指定目标节点
+//	reply, err := topic.PublishWithReply(ctx, data)
+//
+//	// 指定一个目标节点
+//	reply, err := topic.PublishWithReply(ctx, data, peerID1)
+//
+//	// 指定多个目标节点
+//	reply, err := topic.PublishWithReply(ctx, data, peerID1, peerID2, peerID3)
+//
+// 参数:
+// - ctx: context.Context 表示上下文，用于控制流程
+// - data: []byte 表示要发送的消息内容
+// - targetNodes: ...peer.ID 表示需要将消息发送到的目标节点列表（可选）
+// 返回值:
+// - []byte: 接收到的回复消息
+// - error: 如果出现错误，返回错误信息
 func (t *Topic) PublishWithReply(ctx context.Context, data []byte, targetNodes ...peer.ID) ([]byte, error) {
-	msgID := uuid.New().String()      // 生成一个唯一的消息 ID，用于匹配回复
-	replyChan := make(chan []byte, 1) // 创建一个带缓冲的通道，用于接收回复
+	// 基础配置
+	const (
+		retryCount  = 3                // 重试次数
+		retryDelay  = 2 * time.Second  // 重试延迟
+		baseTimeout = 5 * time.Second  // 基础超时时间
+		maxTimeout  = 15 * time.Second // 最大超时时间
+	)
 
-	t.mux.Lock()                   // 加锁以保护共享数据结构的访问
-	t.p.replies[msgID] = replyChan // 将消息 ID 和通道关联存储到 replies map 中
-	t.mux.Unlock()                 // 解锁
-
-	var err error
-	for i := 0; i < t.p.retry; i++ { // 循环执行重试机制
-		pubOpts := []PubOpt{
-			WithReadiness(MinTopicSize(numHosts)),                  // 设置对等节点准备
-			WithMessageMetadata(msgID, pb.MessageMetadata_REQUEST), // 设置消息元数据
-		}
-
-		// 只有在提供了目标节点时才添加 WithTargetMap 选项
-		if len(targetNodes) > 0 {
-			pubOpts = append(pubOpts, WithTargetMap(targetNodes))
-		}
-
-		err = t.Publish(ctx, data, pubOpts...)
-		if err == nil { // 如果发布成功，退出循环
-			break
-		}
-		logrus.Printf("第 %d 次发布尝试失败: %v", i+1, err)
-		time.Sleep(500 * time.Millisecond) // 在重试之间添加短暂的延迟
+	// 上下文检查
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
-	if err != nil { // 如果经过多次重试仍然失败
-		return nil, fmt.Errorf("多次重试后发布消息失败: %d 次重试后失败: %v", t.p.retry, err)
+	// 创建带超时的上下文
+	timeoutCtx, cancel := context.WithTimeout(ctx, maxTimeout)
+	defer cancel()
+
+	// 生成消息ID和回复通道
+	msgID := uuid.New().String()
+	replyChan := make(chan []byte, 1)
+
+	// 注册回复通道并确保清理
+	t.mux.Lock()
+	if t.closed {
+		t.mux.Unlock()
+		return nil, ErrTopicClosed
+	}
+	t.p.replies[msgID] = replyChan
+	t.mux.Unlock()
+
+	defer func() {
+		t.mux.Lock()
+		delete(t.p.replies, msgID)
+		t.mux.Unlock()
+	}()
+
+	// 检查并过滤目标节点
+	var validTargets []peer.ID
+	if len(targetNodes) > 0 {
+		for _, target := range targetNodes {
+			// 检查节点连接状态
+			switch t.p.host.Network().Connectedness(target) {
+			case network.Connected:
+				validTargets = append(validTargets, target)
+			case network.CanConnect:
+				// 尝试连接
+				if err := t.p.host.Connect(timeoutCtx, peer.AddrInfo{ID: target}); err == nil {
+					validTargets = append(validTargets, target)
+				}
+			}
+		}
+		// 如果没有有效的目标节点
+		if len(validTargets) == 0 {
+			return nil, fmt.Errorf("没有可用的目标节点")
+		}
 	}
 
+	// 发布消息（带重试）
+	publishWithRetry := func() error {
+		for i := 0; i < retryCount; i++ {
+			select {
+			case <-timeoutCtx.Done():
+				return timeoutCtx.Err()
+			default:
+				// 构建发布选项
+				pubOpts := []PubOpt{
+					WithMessageMetadata(msgID, pb.MessageMetadata_REQUEST),
+				}
+
+				// 添加目标节点（如果有）
+				if len(validTargets) > 0 {
+					pubOpts = append(pubOpts, WithTargetMap(validTargets))
+				}
+
+				// 发布消息
+				if err := t.Publish(timeoutCtx, data, pubOpts...); err == nil {
+					return nil
+				} else {
+					logrus.Warnf("[Topic] 发布尝试 %d/%d 失败: %v", i+1, retryCount, err)
+					// 最后一次重试失败直接返回错误
+					if i == retryCount-1 {
+						return fmt.Errorf("发布失败，已重试 %d 次: %v", retryCount, err)
+					}
+				}
+
+				// 重试延迟
+				timer := time.NewTimer(retryDelay)
+				select {
+				case <-timeoutCtx.Done():
+					timer.Stop()
+					return timeoutCtx.Err()
+				case <-timer.C:
+					continue
+				}
+			}
+		}
+		return nil
+	}
+
+	// 执行发布
+	if err := publishWithRetry(); err != nil {
+		return nil, err
+	}
+
+	// 等待响应
 	select {
-	case reply := <-replyChan: // 如果收到回复
-		return reply, nil // 返回收到的回复
-	case <-time.After(t.p.timeout): // 如果等待超时
-		return nil, errors.New("等待回复超时")
+	case reply := <-replyChan:
+		if len(reply) == 0 {
+			return nil, fmt.Errorf("收到空响应")
+		}
+		return reply, nil
+	case <-timeoutCtx.Done():
+		return nil, fmt.Errorf("等待响应超时（%v）", maxTimeout)
 	}
 }
 
