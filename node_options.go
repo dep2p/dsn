@@ -7,6 +7,15 @@ import (
 	"github.com/libp2p/go-libp2p/core/peer"
 )
 
+// PubSubType 定义发布订阅的类型
+type PubSubType int
+
+const (
+	GossipSub PubSubType = iota // GossipSub 类型
+	FloodSub                    // FloodSub 类型
+	RandomSub                   // RandomSub 类型
+)
+
 // Options 定义了 DSN 的配置选项
 type Options struct {
 	mu sync.Mutex // 互斥锁，用于保护字段的并发访问
@@ -22,6 +31,8 @@ type Options struct {
 	DirectPeers         []peer.AddrInfo // 直连对等节点列表
 	HeartbeatInterval   time.Duration   // 心跳间隔
 	MaxTransmissionSize int             // 最大传输大小
+	LoadConfig          bool            // 是否加载配置选项
+	PubSubMode          PubSubType      // 发布订阅模式
 }
 
 // NodeOption 定义了一个函数类型，用于配置DSN
@@ -58,7 +69,9 @@ func DefaultOptions() *Options {
 		SignMessages:        true,            // 默认签名消息
 		ValidateMessages:    true,            // 默认验证消息
 		HeartbeatInterval:   1 * time.Second, // 默认心跳间隔为1秒
-		MaxTransmissionSize: 1024 * 1024,     // 默认最大传输大小为1MB
+		MaxTransmissionSize: 10 << 20,        // 默认最大传输大小为10MB
+		LoadConfig:          false,           // 默认不加载配置
+		PubSubMode:          GossipSub,       // 默认使用 GossipSub
 	}
 }
 
@@ -205,6 +218,22 @@ func WithSetDlo(dlo int) NodeOption {
 	}
 }
 
+// WithSetLoadConfig 设置是否加载配置选项
+func WithSetLoadConfig(load bool) NodeOption {
+	return func(o *Options) error {
+		o.LoadConfig = load
+		return nil
+	}
+}
+
+// WithSetPubSubMode 设置发布订阅模式
+func WithSetPubSubMode(mode PubSubType) NodeOption {
+	return func(o *Options) error {
+		o.PubSubMode = mode
+		return nil
+	}
+}
+
 // 以下是获取各种选项值的方法，它们都使用互斥锁来保证并发安全
 
 // GetFollowupTime 获取跟随时间
@@ -304,4 +333,18 @@ func (o *Options) GetDlo() int {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return o.Dlo
+}
+
+// GetLoadConfig 获取是否加载配置选项
+func (o *Options) GetLoadConfig() bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.LoadConfig
+}
+
+// GetPubSubMode 获取发布订阅模式
+func (o *Options) GetPubSubMode() PubSubType {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.PubSubMode
 }
