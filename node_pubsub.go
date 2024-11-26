@@ -5,6 +5,7 @@ package dsn
 import (
 	"context"
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -119,11 +120,28 @@ func (dsn *DSN) startPubSub(options *Options) error {
 		switch options.GetPubSubMode() {
 		case GossipSub:
 			// GossipSub 特定的参数配置
+			// 设置 GossipSub 参数
 			params := DefaultGossipSubParams()
-			params.D = options.D                                 // 设置每个节点维护的对等点数量
-			params.Dlo = options.Dlo                             // 设置对等点数量的最小阈值
-			params.HeartbeatInterval = options.HeartbeatInterval // 设置心跳间隔
-			params.IWantFollowupTime = options.FollowupTime      // 设置消息请求的跟进时间
+
+			// 设置每个节点维护的对等点数量，最小为2
+			params.D = int(math.Max(2, float64(options.D)))
+
+			// 设置对等点数量的最小阈值，最小为1
+			params.Dlo = int(math.Max(1, float64(options.Dlo)))
+
+			// 设置心跳间隔，不超过1秒
+			if options.HeartbeatInterval > time.Second {
+				params.HeartbeatInterval = time.Second
+			} else {
+				params.HeartbeatInterval = options.HeartbeatInterval
+			}
+
+			// 设置消息请求的跟进时间，不超过2秒
+			if options.FollowupTime > 2*time.Second {
+				params.IWantFollowupTime = 2 * time.Second
+			} else {
+				params.IWantFollowupTime = options.FollowupTime
+			}
 
 			// GossipSub 特定的选项
 			gossipOpts := []Option{
@@ -389,121 +407,95 @@ func (dsn *DSN) SubscribeWithTopic(topic string, handler PubSubMsgHandler, subsc
 	return nil
 }
 
-// // topicSubLoop 用于处理订阅主题的消息循环
-// // 参数:
-// //   - topicSub: 订阅实例
-// //   - handler: 用于处理接收到的消息的函数
-// func (dsn *DSN) topicSubLoop(topicSub *Subscription, handler PubSubMsgHandler) {
-// 	for {
-// 		// 获取下一条消息
-// 		message, err := topicSub.Next(dsn.ctx)
-
-// 		if err != nil {
-// 			if err.Error() == "subscription cancelled" {
-// 				logrus.Warn("[DSN] 订阅已取消：", err)
-// 				break
-// 			}
-// 			logrus.Errorf("[DSN] 订阅下一个消息失败：%s", err.Error())
-// 		}
-
-// 		if message == nil {
-// 			return
-// 		}
-
-// 		// 忽略自己发送的消息
-// 		if message.GetFrom() == dsn.host.ID() {
-// 			continue
-// 		}
-
-// 		// 解析消息
-// 		var request Message
-// 		if err := request.Unmarshal(message.Data); err != nil {
-// 			return
-// 		}
-
-// 		if len(request.From) == 0 {
-// 			return
-// 		}
-
-// 		pid, err := peer.IDFromBytes(request.From) // 从消息中提取 peer.ID
-// 		if err != nil {
-// 			return
-// 		}
-
-// 		// 检查接收者是否为自己
-// 		if pid.String() != dsn.host.ID().String() {
-// 			continue
-// 		}
-
-// 		// 处理消息
-// 		handler(&request)
-// 	}
-// }
-
-// topicSubLoop 用于处理订阅主题的消息循环
+// topicSubLoop 处理订阅主题的消息循环
+//
 // 参数:
-//   - topicSub: 订阅实例
-//   - handler: 用于处理接收到的消息的函数
+// - topicSub: *Subscription 表示订阅的主题
+// - handler: PubSubMsgHandler 表示处理消息的回调函数
+//
+// 功能:
+// - 持续监听订阅主题的消息
+// - 过滤掉自己发送的消息
+// - 异步处理接收到的消息
+// - 处理各种错误情况
 func (dsn *DSN) topicSubLoop(topicSub *Subscription, handler PubSubMsgHandler) {
+	logrus.Info("[DSN] 开始订阅消息循环")
+
 	for {
 		// 获取下一条消息
+		logrus.Info("[DSN] 等待接收下一条消息...")
 		message, err := topicSub.Next(dsn.ctx)
 
+		// 错误处理
 		if err != nil {
 			if err.Error() == "subscription cancelled" {
-				logrus.Warn("[DSN] 订阅已取消：", err)
+				logrus.Warn("[DSN] 订阅已被取消，退出消息循环: ", err)
 				break
 			}
-			logrus.Errorf("[DSN] 订阅下一个消息失败：%s", err.Error())
+			if err.Error() == "context canceled" {
+				logrus.Info("[DSN] 上下文已取消，退出消息循环")
+				break
+			}
+			logrus.Errorf("[DSN] 接收消息失败: %s", err.Error())
+			continue
 		}
 
+		// 消息有效性检查
 		if message == nil {
-			return
+			logrus.Info("[DSN] 收到空消息，跳过处理")
+			continue
 		}
 
 		// 忽略自己发送的消息
 		if message.GetFrom() == dsn.host.ID() {
+			logrus.Info("[DSN] 忽略自己发送的消息")
 			continue
 		}
 
-		// 解析消息
-		// var request Message
-		// fmt.Println(len(message.Data))
-		// if err := request.Unmarshal(message); err != nil {
-		// 	return
-		// }
-
+		// 检查消息来源
 		if len(message.From) == 0 {
-			return
-		}
-
-		pid, err := peer.IDFromBytes(message.From) // 从消息中提取 peer.ID
-		if err != nil {
-
-			return
-		}
-
-		// 检查接收者是否为自己
-		if pid.String() == dsn.host.ID().String() {
+			logrus.Info("[DSN] 消息来源为空，跳过处理")
 			continue
 		}
 
-		// 使用 goroutine 处理消息，避免阻塞
-		go func() {
-			defer dsn.cancel()
+		// 解析发送者ID
+		pid, err := peer.IDFromBytes(message.From)
+		if err != nil {
+			logrus.Errorf("[DSN] 无法解析消息发送者ID: %s", err.Error())
+			continue
+		}
+
+		// 再次确认消息不是自己发送的
+		if pid.String() == dsn.host.ID().String() {
+			logrus.Info("[DSN] 再次确认消息来自自己，跳过处理")
+			continue
+		}
+
+		// 创建处理消息的上下文
+		msgCtx, cancel := context.WithTimeout(dsn.ctx, 15*time.Second)
+		logrus.Infof("[DSN] 开始处理来自节点 %s 的消息", pid.String())
+
+		// 异步处理消息
+		go func(ctx context.Context, msg *Message) {
+			defer cancel()
 			select {
-			case <-dsn.ctx.Done():
+			case <-ctx.Done():
+				logrus.Warn("[DSN] 消息处理超时或上下文已取消")
 				return
 			default:
-				handler(message)
+				logrus.Info("[DSN] 调用消息处理函数")
+				handler(msg)
+				logrus.Info("[DSN] 消息处理完成")
 			}
-		}()
+		}(msgCtx, message)
 	}
+
+	logrus.Info("[DSN] 订阅消息循环结束")
 }
 
 // Pubsub 返回 PubSub 实例
 // 返回:
-//   - *PubSub: 当前DSN��例使用的PubSub实例
+//   - *PubSub: 当前DSN例使用的PubSub实例
 func (dsn *DSN) Pubsub() *PubSub {
 	return dsn.pubsub
 }

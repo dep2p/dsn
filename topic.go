@@ -345,12 +345,15 @@ func (t *Topic) PublishWithReply(ctx context.Context, data []byte, targetNodes .
 		retryCount  = 3                // 重试次数
 		retryDelay  = 2 * time.Second  // 重试延迟
 		baseTimeout = 5 * time.Second  // 基础超时时间
-		maxTimeout  = 15 * time.Second // 最大超时时间
+		maxTimeout  = 60 * time.Second // 最大超时时间
 	)
+
+	logrus.Infof("[Topic] 开始发布消息并等待回复，目标节点数量: %d", len(targetNodes))
 
 	// 上下文检查
 	if ctx == nil {
 		ctx = context.Background()
+		logrus.Info("[Topic] 使用默认上下文")
 	}
 
 	// 创建带超时的上下文
@@ -360,11 +363,13 @@ func (t *Topic) PublishWithReply(ctx context.Context, data []byte, targetNodes .
 	// 生成消息ID和回复通道
 	msgID := uuid.New().String()
 	replyChan := make(chan []byte, 1)
+	logrus.Infof("[Topic] 生成消息ID: %s", msgID)
 
 	// 注册回复通道并确保清理
 	t.mux.Lock()
 	if t.closed {
 		t.mux.Unlock()
+		logrus.Error("[Topic] 主题已关闭")
 		return nil, ErrTopicClosed
 	}
 	t.p.replies[msgID] = replyChan
@@ -374,27 +379,36 @@ func (t *Topic) PublishWithReply(ctx context.Context, data []byte, targetNodes .
 		t.mux.Lock()
 		delete(t.p.replies, msgID)
 		t.mux.Unlock()
+		logrus.Infof("[Topic] 清理消息ID: %s 的回复通道", msgID)
 	}()
 
 	// 检查并过滤目标节点
 	var validTargets []peer.ID
 	if len(targetNodes) > 0 {
+		logrus.Info("[Topic] 开始验证目标节点")
 		for _, target := range targetNodes {
 			// 检查节点连接状态
 			switch t.p.host.Network().Connectedness(target) {
 			case network.Connected:
 				validTargets = append(validTargets, target)
-			case network.CanConnect:
+				logrus.Infof("[Topic] 节点 %s 已连接", target)
+			default:
+				logrus.Infof("[Topic] 尝试连接节点 %s", target)
 				// 尝试连接
 				if err := t.p.host.Connect(timeoutCtx, peer.AddrInfo{ID: target}); err == nil {
 					validTargets = append(validTargets, target)
+					logrus.Infof("[Topic] 成功连接节点 %s", target)
+				} else {
+					logrus.Warnf("[Topic] 连接节点 %s 失败: %v", target, err)
 				}
 			}
 		}
 		// 如果没有有效的目标节点
 		if len(validTargets) == 0 {
+			logrus.Error("[Topic] 没有可用的目标节点")
 			return nil, fmt.Errorf("没有可用的目标节点")
 		}
+		logrus.Infof("[Topic] 有效目标节点数量: %d", len(validTargets))
 	}
 
 	// 发布消息（带重试）
@@ -402,8 +416,10 @@ func (t *Topic) PublishWithReply(ctx context.Context, data []byte, targetNodes .
 		for i := 0; i < retryCount; i++ {
 			select {
 			case <-timeoutCtx.Done():
+				logrus.Error("[Topic] 发布超时")
 				return timeoutCtx.Err()
 			default:
+				logrus.Infof("[Topic] 开始第 %d/%d 次发布尝试", i+1, retryCount)
 				// 构建发布选项
 				pubOpts := []PubOpt{
 					WithMessageMetadata(msgID, pb.MessageMetadata_REQUEST),
@@ -416,6 +432,7 @@ func (t *Topic) PublishWithReply(ctx context.Context, data []byte, targetNodes .
 
 				// 发布消息
 				if err := t.Publish(timeoutCtx, data, pubOpts...); err == nil {
+					logrus.Infof("[Topic] 第 %d 次发布成功", i+1)
 					return nil
 				} else {
 					logrus.Warnf("[Topic] 发布尝试 %d/%d 失败: %v", i+1, retryCount, err)
@@ -430,8 +447,10 @@ func (t *Topic) PublishWithReply(ctx context.Context, data []byte, targetNodes .
 				select {
 				case <-timeoutCtx.Done():
 					timer.Stop()
+					logrus.Error("[Topic] 重试等待时超时")
 					return timeoutCtx.Err()
 				case <-timer.C:
+					logrus.Infof("[Topic] 准备第 %d 次重试", i+2)
 					continue
 				}
 			}
@@ -441,17 +460,22 @@ func (t *Topic) PublishWithReply(ctx context.Context, data []byte, targetNodes .
 
 	// 执行发布
 	if err := publishWithRetry(); err != nil {
+		logrus.Errorf("[Topic] 发布最终失败: %v", err)
 		return nil, err
 	}
 
 	// 等待响应
+	logrus.Info("[Topic] 等待响应...")
 	select {
 	case reply := <-replyChan:
 		if len(reply) == 0 {
+			logrus.Error("[Topic] 收到空响应")
 			return nil, fmt.Errorf("收到空响应")
 		}
+		logrus.Infof("[Topic] 成功收到响应，长度: %d bytes", len(reply))
 		return reply, nil
 	case <-timeoutCtx.Done():
+		logrus.Errorf("[Topic] 等待响应超时（%v）", maxTimeout)
 		return nil, fmt.Errorf("等待响应超时（%v）", maxTimeout)
 	}
 }

@@ -11,7 +11,6 @@ import (
 	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/libp2p/go-libp2p/p2p/protocol/ping"
-	"github.com/sirupsen/logrus"
 )
 
 // NodeStatus 表示节点的状态
@@ -36,7 +35,7 @@ type StatusChange struct {
 	NetworkLatency    time.Duration // 网络延迟
 }
 
-// Node 表示一个节点及其状态信息
+// Node 表示一个节点及其状态息
 type Node struct {
 	ID                  peer.ID         // 节点ID
 	Status              NodeStatus      // 当前状态
@@ -62,7 +61,7 @@ type NodeStatusTracker struct {
 	mu                   sync.RWMutex        // 读写锁
 	ctx                  context.Context     // 上下文
 	cancel               context.CancelFunc  // 取消函数
-	statusChanges        chan StatusChange   // 状态变化通道
+	statusChanges        chan StatusChange   // 态变化通道
 	subscribers          []chan StatusChange // 订阅者列表
 }
 
@@ -99,7 +98,7 @@ func (nst *NodeStatusTracker) Start() {
 	go nst.processStatusChanges() // 启动状态变化处理例程
 }
 
-// Stop 停止节点状态跟踪器
+// Stop 停止节点状跟踪器
 func (nst *NodeStatusTracker) Stop() {
 	nst.cancel() // 调用取消函数停止所有goroutine
 }
@@ -133,165 +132,236 @@ func (nst *NodeStatusTracker) checkAllNodes() {
 	}
 }
 
-// checkNode 检查单个节点的状态
-// 参数:
-//   - pid: 要检查的节点ID
+// checkNode 检查单个节点的状态 - 非阻塞主入口
 func (nst *NodeStatusTracker) checkNode(pid peer.ID) {
+	// 1. 快速路径检查 - 使用读锁
+	nst.mu.RLock()
+	node, exists := nst.nodes[pid]
+	if exists {
+		// 跳过频繁检查
+		if time.Since(node.LastCheckTime) < node.CheckInterval {
+			nst.mu.RUnlock()
+			return
+		}
+		// 在线且活跃的节点降低检查频率
+		if node.Status == Online && time.Since(node.LastSeen) < 5*time.Second {
+			nst.mu.RUnlock()
+			return
+		}
+	}
+	nst.mu.RUnlock()
+
+	// 2. 快速连接检查 - 无需加锁
+	if nst.host.Network().Connectedness(pid) == network.Connected {
+		nst.handleQuickSuccess(pid)
+		return
+	}
+
+	// 3. 异步执行完整检查
+	go nst.asyncFullCheck(pid)
+}
+
+// handleQuickSuccess 处理快速路径成功的情况
+func (nst *NodeStatusTracker) handleQuickSuccess(pid peer.ID) {
 	nst.mu.Lock()
 	defer nst.mu.Unlock()
 
-	// 基础配置 - 更友好的参数设置
-	const (
-		maxScore = 1.0 // 最大评分
-		minScore = 0.3 // 最小评分不要太低，给予恢复机会
-		// 成功恢复的奖励大于失败的惩罚
-		scoreIncrement = 0.2 // 成功时的评分增加
-		scoreDecrement = 0.1 // 失败时的评分减少
-		// 降低恢复门槛
-		recoveryThreshold = 2 // 恢复所需的连续成功次数
-		// 网络波动容忍度
-		networkJitterTolerance = 3 * time.Second
-	)
-
-	// 获取或创建节点
 	node, exists := nst.nodes[pid]
 	if !exists {
+		// 新节点初始化 - 给予较高的初始信任度
 		node = &Node{
-			ID:                  pid,
-			Status:              Online,
-			LastSeen:            time.Now(),
-			Score:               0.7, // 初始分值适中，给予成长空间
-			CheckInterval:       nst.defaultCheckInterval,
-			FailedAttempts:      0,
-			History:             make([]StatusChange, 0),
-			SuccessiveSuccesses: 0,
-			LastCheckTime:       time.Now(),
-			ConnectionQuality:   0.7,                      // 初始连接质量适中
-			NetworkCondition:    make([]time.Duration, 0), // 存储最近的网络延迟
+			ID:                pid,
+			Status:            Online,
+			LastSeen:          time.Now(),
+			Score:             0.8,
+			CheckInterval:     nst.defaultCheckInterval * 2,
+			ConnectionQuality: 0.8,
+			NetworkCondition:  make([]time.Duration, 0),
+			History:           make([]StatusChange, 0),
 		}
 		nst.nodes[pid] = node
+		return
 	}
 
-	oldStatus := node.Status
-	checkTime := time.Now()
-	// timeSinceLastCheck := checkTime.Sub(node.LastCheckTime)
+	// 更新基本状态
+	node.LastSeen = time.Now()
+	node.LastCheckTime = time.Now()
+	if node.Status != Online {
+		nst.updateNodeStatus(node, Online)
+	}
+}
 
-	// 检查网络状态
-	isConnected := nst.host.Network().Connectedness(pid) == network.Connected
-	var pingLatency time.Duration
+// asyncFullCheck 执行完整的异步节点检查
+func (nst *NodeStatusTracker) asyncFullCheck(pid peer.ID) {
+	const (
+		quickCheckTimeout = 500 * time.Millisecond
+		fullCheckTimeout  = 3 * time.Second
+	)
 
-	// 智能 ping 策略
-	if !isConnected {
-		// 如果距离上次成功不久，给予宽限
-		if time.Since(node.LastSeen) < networkJitterTolerance {
-			// 临时网络抖动，保持当前状态
+	// 1. 创建检查上下文
+	ctx, cancel := context.WithTimeout(context.Background(), fullCheckTimeout)
+	defer cancel()
+
+	// 2. 并行执行多种检查
+	results := make(chan checkResult, 4)
+
+	// 2.1 直连检查
+	go func() {
+		results <- checkResult{
+			name:    "direct",
+			success: nst.host.Network().Connectedness(pid) == network.Connected,
+		}
+	}()
+
+	// 2.2 Ping 检查
+	go func() {
+		start := time.Now()
+		success := nst.pingNode(pid)
+		results <- checkResult{
+			name:    "ping",
+			success: success,
+			latency: time.Since(start),
+		}
+	}()
+
+	// 2.3 DHT 查找（如果可用）
+	go func() {
+		results <- checkResult{
+			name:    "dht",
+			success: nst.checkDHT(pid),
+		}
+	}()
+
+	// 3. 收集检查结果
+	success := false
+	var bestLatency time.Duration
+	checkCount := 0
+
+	for checkCount < 3 {
+		select {
+		case result := <-results:
+			checkCount++
+			if result.success {
+				success = true
+				if result.latency > 0 {
+					bestLatency = result.latency
+				}
+				// 一旦发现成功，快速更新状态
+				nst.updateNodeState(pid, true, bestLatency)
+				return
+			}
+		case <-ctx.Done():
+			// 超时处理
+			nst.updateNodeState(pid, false, 0)
 			return
 		}
-
-		start := time.Now()
-		canPing := nst.pingNode(pid)
-		if canPing {
-			pingLatency = time.Since(start)
-			isConnected = true // 如果可以 ping 通，视为连接正常
-		}
 	}
 
-	// 状态更新逻辑
+	// 所有检查都失败
+	if !success {
+		nst.updateNodeState(pid, false, 0)
+	}
+}
+
+// checkResult 表示单个检查的结果
+type checkResult struct {
+	name    string
+	success bool
+	latency time.Duration
+}
+
+// updateNodeState 更新节点状态并调整检查间隔
+// 参数:
+//   - pid: 节点ID
+//   - isConnected: 是否连接成功
+//   - latency: 网络延迟
+func (nst *NodeStatusTracker) updateNodeState(pid peer.ID, isConnected bool, latency time.Duration) {
+	nst.mu.Lock()
+	defer nst.mu.Unlock()
+
+	// 定义状态转换和评分的关键阈值
+	const (
+		minScore               = 0.4             // 最低评分阈值
+		recoveryThreshold      = 2               // 状态恢复所需的连续成功次数
+		maxFailureThreshold    = 5               // 状态降级的失败阈值
+		networkJitterTolerance = 5 * time.Second // 网络抖动容忍时间
+	)
+
+	// 获取节点信息
+	node, exists := nst.nodes[pid]
+	if !exists {
+		return
+	}
+
+	now := time.Now()
+	oldStatus := node.Status
+
 	if isConnected {
-		// 成功连接处理
+		// 处理连接成功的情况
+		node.LastSeen = now
 		node.SuccessiveSuccesses++
-		node.LastSeen = checkTime
+		// 快速减少失败计数，给予节点恢复机会
+		node.FailedAttempts = int(float64(node.FailedAttempts) * 0.3)
 
-		// 智能失败次数重置
-		if node.FailedAttempts > 0 {
-			// 渐进式减少失败计数，而不是直接清零
-			node.FailedAttempts = int(float64(node.FailedAttempts) * 0.5)
+		// 根据连续成功次数动态调整评分增长
+		scoreIncrease := 0.1 * (1 + float64(node.SuccessiveSuccesses)/20)
+		node.Score = math.Min(1.0, node.Score+scoreIncrease)
+
+		// 动态调整检查间隔
+		if node.Score > 0.8 {
+			node.CheckInterval = nst.defaultCheckInterval * 2 // 高分节点降低检查频率
+		} else {
+			node.CheckInterval = nst.defaultCheckInterval // 其他情况使用默认间隔
 		}
 
-		// 更新网络质量评估
-		if pingLatency > 0 {
-			node.NetworkCondition = append(node.NetworkCondition, pingLatency)
-			if len(node.NetworkCondition) > 10 {
-				node.NetworkCondition = node.NetworkCondition[1:]
-			}
-
-			// 计算平均网络状况
-			var avgLatency time.Duration
-			for _, latency := range node.NetworkCondition {
-				avgLatency += latency
-			}
-			avgLatency /= time.Duration(len(node.NetworkCondition))
-
-			// 基于平均延迟动态调整连接质量
-			qualityFactor := float64(time.Second) / float64(avgLatency)
-			node.ConnectionQuality = (node.ConnectionQuality*0.7 + qualityFactor*0.3)
-		}
-
-		// 评分提升 - 根据连续成功次数给予额外奖励
-		scoreBonus := scoreIncrement * (1 + float64(node.SuccessiveSuccesses)/10)
-		node.Score = math.Min(maxScore, node.Score+scoreBonus)
-
-		// 状态恢复逻辑 - 更宽容的恢复策略
-		if node.Status != Online && node.SuccessiveSuccesses >= recoveryThreshold {
+		// 状态恢复逻辑
+		if node.Status != Online &&
+			(node.SuccessiveSuccesses >= recoveryThreshold ||
+				time.Since(node.LastSeen) < networkJitterTolerance) {
 			nst.updateNodeStatus(node, Online)
 		}
 	} else {
-		// 失败处理 - 更友好的策略
+		// 处理连接失败的情况
+		if time.Since(node.LastSeen) < networkJitterTolerance {
+			return // 跳过临时性失败
+		}
+
 		node.FailedAttempts++
 		node.SuccessiveSuccesses = 0
 
-		// 评分调整 - 考虑历史表现
-		penaltyFactor := math.Max(0.5, float64(node.Score)) // 评分越高，惩罚越轻
-		actualDecrement := scoreDecrement * penaltyFactor
+		// 根据当前评分计算惩罚力度
+		penaltyFactor := math.Max(0.7, float64(node.Score))
+		actualDecrement := 0.05 * penaltyFactor
 		node.Score = math.Max(minScore, node.Score-actualDecrement)
 
-		// 状态降级逻辑 - 更渐进的方式
-		if node.FailedAttempts >= nst.offlineThreshold*3 {
-			if node.Status != Offline {
-				nst.updateNodeStatus(node, Offline)
-				// 异步进行深度检查
-				go nst.performDeepCheck(pid)
-			}
-		} else if node.FailedAttempts >= nst.offlineThreshold {
-			if node.Status != Suspicious {
+		// 缩短检查间隔以更快发现状态改善
+		node.CheckInterval = nst.defaultCheckInterval / 2
+
+		// 渐进式状态降级
+		if node.FailedAttempts >= maxFailureThreshold {
+			if node.Status == Online {
 				nst.updateNodeStatus(node, Suspicious)
+			} else if node.Status == Suspicious &&
+				node.FailedAttempts >= maxFailureThreshold*2 {
+				nst.updateNodeStatus(node, Offline)
+				go nst.performDeepCheck(pid) // 触发深度检查
 			}
 		}
 	}
 
-	// 动态调整检查间隔 - 基于网络状况
-	nst.adjustCheckIntervalBasedOnNetwork(node)
-
 	// 记录状态变化
 	if oldStatus != node.Status {
-		statusChange := StatusChange{
+		nst.recordStatusChange(StatusChange{
 			PeerID:            pid,
 			OldStatus:         oldStatus,
 			NewStatus:         node.Status,
-			Timestamp:         checkTime,
+			Timestamp:         now,
 			Score:             node.Score,
 			ConnectionQuality: node.ConnectionQuality,
 			CheckInterval:     node.CheckInterval,
 			FailedAttempts:    node.FailedAttempts,
-			NetworkLatency:    pingLatency,
-		}
-
-		node.History = append(node.History, statusChange)
-		if len(node.History) > 100 {
-			node.History = node.History[1:]
-		}
-
-		nst.recordStatusChange(statusChange)
-	}
-
-	// 更新检查时间
-	node.LastCheckTime = checkTime
-
-	// 调试日志
-	if logrus.IsLevelEnabled(logrus.DebugLevel) {
-		logrus.Debugf("节点检查 [%s] - 状态: %v, 评分: %.2f, 质量: %.2f, 失败: %d, 连续成功: %d",
-			pid.String()[:8], node.Status, node.Score, node.ConnectionQuality,
-			node.FailedAttempts, node.SuccessiveSuccesses)
+			NetworkLatency:    latency,
+		})
 	}
 }
 
@@ -328,19 +398,6 @@ func (nst *NodeStatusTracker) pingNode(pid peer.ID) bool {
 		return true // ping成功
 	case <-ctx.Done():
 		return false // ping超时
-	}
-}
-
-// adjustCheckInterval 根据节点历史表现调整检查间隔
-// 参数:
-//   - node: 要调整的节点
-func (nst *NodeStatusTracker) adjustCheckInterval(node *Node) {
-	if node.Score > 0.8 {
-		node.CheckInterval = nst.defaultCheckInterval * 2 // 评分高，增加检查间隔
-	} else if node.Score < 0.3 {
-		node.CheckInterval = nst.defaultCheckInterval / 2 // 评分低，减少检查间隔
-	} else {
-		node.CheckInterval = nst.defaultCheckInterval // 评分中等，使用默认间隔
 	}
 }
 
@@ -464,92 +521,6 @@ func max(a, b float64) float64 {
 	return b
 }
 
-// confirmNodeStatus 对可能不健康的节点进行额外确认
-// 参数:
-//   - pid: 要确认状态的节点ID
-func (nst *NodeStatusTracker) confirmNodeStatus(pid peer.ID) {
-	retries := 3
-	retryInterval := time.Second * 30
-
-	for i := 0; i < retries; i++ {
-		time.Sleep(retryInterval)
-
-		nst.mu.Lock()
-		node, exists := nst.nodes[pid]
-		if !exists {
-			nst.mu.Unlock()
-			return
-		}
-
-		// 检查节点是否已连接或可以ping通
-		if nst.host.Network().Connectedness(pid) == network.Connected || nst.pingNode(pid) {
-			nst.updateNodeStatus(node, Online)
-			nst.mu.Unlock()
-			return
-		}
-
-		nst.mu.Unlock()
-	}
-
-	// 如果多次重试后仍然失败，则将节点标记为离线
-	nst.mu.Lock()
-	defer nst.mu.Unlock()
-
-	node, exists := nst.nodes[pid]
-	if exists {
-		nst.updateNodeStatus(node, Offline)
-		nst.recordStatusChange(StatusChange{
-			PeerID:    pid,
-			OldStatus: node.Status,
-			NewStatus: Offline,
-			Timestamp: time.Now(),
-		})
-	}
-}
-
-// adjustCheckIntervalBasedOnNetwork 基于网络状况调整检查间隔
-func (nst *NodeStatusTracker) adjustCheckIntervalBasedOnNetwork(node *Node) {
-	// 基础间隔
-	baseInterval := nst.defaultCheckInterval
-
-	// 根据节点状态调整
-	switch node.Status {
-	case Online:
-		// 在线状态下，根据连接质量调整
-		if node.ConnectionQuality > 0.8 {
-			// 连接质量好，可以适当延长间隔
-			node.CheckInterval = baseInterval * 2
-		} else {
-			// 保持默认间隔
-			node.CheckInterval = baseInterval
-		}
-	case Suspicious:
-		// 可疑状态下，缩短检查间隔但不要太频繁
-		node.CheckInterval = baseInterval / 2
-	case Offline:
-		// 离线状态下，采用渐进式增加的检查间隔
-		// 避免频繁检查已知离线的节点
-		offlineTime := time.Since(node.LastSeen)
-		if offlineTime > time.Hour {
-			node.CheckInterval = baseInterval * 4
-		} else if offlineTime > time.Minute*30 {
-			node.CheckInterval = baseInterval * 2
-		} else {
-			node.CheckInterval = baseInterval
-		}
-	}
-
-	// 确保检查间隔在合理范围内
-	minInterval := time.Second * 5
-	maxInterval := time.Minute * 5
-	node.CheckInterval = time.Duration(
-		math.Max(
-			float64(minInterval),
-			math.Min(float64(maxInterval), float64(node.CheckInterval)),
-		),
-	)
-}
-
 // performDeepCheck 执行深度节点检查
 func (nst *NodeStatusTracker) performDeepCheck(pid peer.ID) {
 	// 创建带超时的上下文
@@ -590,4 +561,22 @@ func (nst *NodeStatusTracker) performDeepCheck(pid peer.ID) {
 			}
 		}
 	}
+}
+
+// checkDHT 通过 DHT 检查节点是否可达
+func (nst *NodeStatusTracker) checkDHT(pid peer.ID) bool {
+	// 创建超时上下文
+	ctx, cancel := context.WithTimeout(nst.ctx, 5*time.Second)
+	defer cancel()
+
+	// 尝试从 DHT 查找节点
+	if dht, ok := nst.host.Peerstore().(interface {
+		FindPeer(context.Context, peer.ID) (peer.AddrInfo, error)
+	}); ok {
+		_, err := dht.FindPeer(ctx, pid)
+		return err == nil
+	}
+
+	// 如果没有 DHT 功能，返回 false
+	return false
 }
