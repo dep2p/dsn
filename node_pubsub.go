@@ -6,6 +6,8 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -102,7 +104,11 @@ func (dsn *DSN) startPubSub(options *Options) error {
 	// 根据 LoadConfig 选项决定是否加载详细配置
 	if options.GetLoadConfig() {
 		// 创建JSON追踪器，用于记录和追踪PubSub网络中的事件和消息流
-		tracer, err := NewJSONTracer("/tmp/trace.out.json")
+		// 获取系统的临时目录
+		tempDir := os.TempDir()
+		// 构建临时文件路径
+		traceFilePath := filepath.Join(tempDir, "trace.out.json")
+		tracer, err := NewJSONTracer(traceFilePath)
 		if err != nil {
 			logrus.Errorf("[DSN] 创建JSON追踪器失败: %v", err)
 			return err
